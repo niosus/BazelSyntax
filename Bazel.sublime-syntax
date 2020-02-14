@@ -1,0 +1,2125 @@
+%YAML 1.2
+---
+name: Bazel
+file_extensions:
+  - BUILD
+  - WORKSPACE
+scope: source.bazel
+
+variables:
+  identifier_continue: '[[:alnum:]_]'
+  identifier: '\b[[:alpha:]_]{{identifier_continue}}*\b'
+  identifier_constant: '\b(?:[\p{Lu}_][\p{Lu}_\d]*)?[\p{Lu}]{2,}[\p{Lu}_\d]*\b'  # require 2 consecutive upper-case letters
+  digitpart: (?:\d(?:_?\d)*)
+  path: '({{identifier}}[ ]*\.[ ]*)*{{identifier}}'
+  sql_indicator: \s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|REPLACE|ALTER|WITH)\b
+  illegal_names: (?:and|as|assert|break|class|continue|def|del|elif|else|except|finally|for|from|global|if|import|in|is|lambda|not|or|pass|raise|return|try|while|with|yield)
+  format_spec: |-
+    (?x:
+      (?:.? [<>=^])?     # fill align
+      [ +-]?             # sign
+      \#?                # alternate form
+      # technically, octal and hexadecimal integers are also supported as 'width', but rarely used
+      \d*                # width
+      ,?                 # thousands separator
+      (?:\.\d+)?         # precision
+      [bcdeEfFgGnosxX%]? # type
+    )
+  strftime_spec: '(?:%(?:[aAwdbBGmyYHIpMSfzZjuUVWcxX%]|-[dmHIMSj]))'
+  # This can be used in look-aheads to parse simple expressions.
+  # Can't be recursive, because sregex doesn't support that,
+  # so we're skipping parentheses.
+  # Can't parse multiple lines as well, for obvious reasons
+  simple_expression: |-
+    (?x:
+      \s+                      # whitespace
+      | [urfb]*"(?:\\.|[^"])*" # strings
+      | [urfb]*'(?:\\.|[^'])*' # ^
+      | [\d.ej]+               # numerics
+      | [+*/%@-] | // | and | or # operators
+      | {{path}}               # a path
+    )*
+
+
+
+contexts:
+  main:
+    - include: statements
+
+  statements:
+    - include: docstrings
+    - include: line-statements
+    - include: block-statements
+    - include: classes
+    - include: functions
+    - include: modifiers
+    - include: assignments
+    - match: ;
+      scope: punctuation.terminator.statement.bazel
+    - include: line-expressions
+
+  line-statements:
+    - include: imports
+    - include: decorators
+    - match: \b(raise)\b
+      scope: keyword.control.flow.raise.bazel
+      push:
+        - meta_scope: meta.statement.raise.bazel
+        - include: line-continuation-or-pop
+        - match: \b(from)\b
+          scope: keyword.control.flow.raise.from.bazel
+          set:
+            - meta_scope: meta.statement.raise.bazel
+            - include: line-continuation-or-pop
+            - include: expressions
+        - include: expressions
+    - match: \b(assert)\b
+      scope: keyword.other.assert.bazel
+    - match: \b(del)\b
+      scope: keyword.other.del.bazel
+    - match: \b(print)\b(?! *([,.()\]}]))
+      scope: keyword.other.print.bazel
+    - match: \b(exec)\b(?! *($|[,.()\]}]))
+      scope: keyword.other.exec.bazel
+    - match: \b(return)\b
+      scope: keyword.control.flow.return.bazel
+    - match: \b(break)\b
+      scope: keyword.control.flow.break.bazel
+    - match: \b(continue)\b
+      scope: keyword.control.flow.continue.bazel
+    - match: \b(pass)\b
+      scope: keyword.control.flow.pass.bazel
+    - match: ':'
+      scope: punctuation.separator.annotation.variable.bazel
+
+  imports:
+    - match: \b(import)\b
+      scope: keyword.control.import.bazel
+      push:
+        - meta_scope: meta.statement.import.bazel
+        - include: line-continuation-or-pop
+        - match: ','
+          scope: punctuation.separator.import-list.bazel
+        - match: \.
+          scope: invalid.illegal.unexpected-relative-import.bazel
+        - include: import-alias
+        - include: qualified-name
+        - match: (?=\S)
+          pop: true
+    - match: \b(from)\b
+      scope: keyword.control.import.from.bazel
+      push:
+        - meta_scope: meta.statement.import.bazel
+        - meta_content_scope: meta.import-source.bazel
+        - include: line-continuation-or-pop
+        - match: \b(import)\b
+          scope: keyword.control.import.bazel
+          set:
+            - meta_scope: meta.statement.import.bazel
+            - include: line-continuation-or-pop
+            - match: ' *(\()'
+              captures:
+                1: punctuation.section.import-list.begin.bazel
+              set:
+                - meta_scope: meta.statement.import.bazel
+                - include: comments
+                - match: \)
+                  scope: punctuation.section.import-list.end.bazel
+                  pop: true
+                - include: import-name-list
+                - match: (?=\S)
+                  pop: true
+            - match: ''
+              set:
+                - meta_scope: meta.statement.import.bazel
+                - include: line-continuation-or-pop
+                - include: import-name-list
+                - match: (?=\S)
+                  pop: true
+            - match: (?=\S)
+              pop: true
+        - include: import-from-name
+        - match: (?=\S)
+          pop: true
+
+  import-name-list:
+    - match: ','
+      scope: punctuation.separator.import-list.bazel
+    - include: import-alias
+    - include: name
+    - match: \*
+      scope: constant.language.import-all.bazel
+    - match: \S+
+      scope: invalid.illegal.name.import.bazel
+
+  import-alias:
+    - match: \b(as)\b
+      scope: keyword.control.import.as.bazel
+
+  import-from-name:
+    - match: \.+
+      scope: meta.import-path.bazel keyword.control.import.relative.bazel
+    - match: (?={{path}})
+      push:
+        - meta_scope: meta.import-path.bazel
+        - match: '{{illegal_names}}\b'
+          scope: invalid.illegal.name.bazel
+        - match: '{{identifier}}'
+          scope: meta.import-name.bazel
+        - match: \s*(\.) *(?:({{illegal_names}}\b)|({{identifier}}))
+          captures:
+            1: punctuation.accessor.dot.bazel
+            2: invalid.illegal.name.bazel
+            3: meta.import-name.bazel
+        - match: \ *(\. *\S+) # matches and consumes the remainder of "abc.123" or "abc.+"
+          captures:
+            1: invalid.illegal.name.bazel
+          pop: true
+        - match: ''
+          pop: true
+
+  block-statements:
+    # async for ... in ...:
+    - match: \b(async +)?(for)\b
+      captures:
+        1: storage.modifier.async.bazel
+        2: keyword.control.flow.for.bazel
+      push:
+        - meta_scope: meta.statement.for.bazel
+        - include: line-continuation-or-pop
+        - match: \b(in)\b
+          scope: keyword.control.flow.for.in.bazel
+          set:
+            - meta_scope: meta.statement.for.bazel
+            - include: line-continuation-or-pop
+            - match: ':'
+              scope: punctuation.section.block.for.bazel
+              pop: true
+            - include: expressions
+        - match: ':'
+          scope: invalid.illegal.missing-in.bazel
+          pop: true
+        - include: target-list
+    # async with ... as ...:
+    - match: \b(async +)?(with)\b
+      captures:
+        1: storage.modifier.async.bazel
+        2: keyword.control.flow.with.bazel
+      push: with-body
+    # except ... as ...:
+    - match: \b(except)\b
+      scope: keyword.control.flow.except.bazel
+      push:
+        - meta_scope: meta.statement.except.bazel
+        - include: line-continuation-or-pop
+        - match: ':'
+          scope: punctuation.section.block.except.bazel
+          pop: true
+        - match: '\b(as)\b'
+          scope: keyword.control.flow.as.bazel
+          set:
+            - meta_content_scope: meta.statement.except.bazel
+            - include: line-continuation-or-pop
+            - match: ':'
+              scope: meta.statement.except.bazel punctuation.section.block.except.bazel
+              pop: true
+            - include: name
+        - include: target-list
+    - match: \bif\b
+      scope: keyword.control.flow.conditional.bazel
+      push:
+        - meta_scope: meta.statement.if.bazel
+        - include: line-continuation-or-pop
+        - match: ':'
+          scope: punctuation.section.block.conditional.bazel
+          pop: true
+        - include: expressions
+    - match: \bwhile\b
+      scope: keyword.control.flow.while.bazel
+      push:
+        - meta_scope: meta.statement.while.bazel
+        - include: line-continuation-or-pop
+        - match: ':'
+          scope: punctuation.section.block.while.bazel
+          pop: true
+        - include: expressions
+    - match: \b(else)\b(?:\s*(:))?
+      scope: meta.statement.conditional.bazel
+      captures:
+        1: keyword.control.flow.conditional.bazel
+        2: punctuation.section.block.bazel
+    - match: \b(try)\b(?:\s*(:))?
+      scope: meta.statement.try.bazel
+      captures:
+        1: keyword.control.flow.try.bazel
+        2: punctuation.section.block.try.bazel
+    - match: \b(finally)\b(?:\s*(:))?
+      scope: meta.statement.finally.bazel
+      captures:
+        1: keyword.control.flow.finally.bazel
+        2: punctuation.section.block.finally.bazel
+    - match: \belif\b
+      scope: keyword.control.flow.conditional.bazel
+      push:
+        - meta_scope: meta.statement.conditional.bazel
+        - match: ':'
+          scope: punctuation.section.block.bazel
+          pop: true
+        - match: $\n?
+          pop: true
+        - include: line-expressions
+
+  with-body:
+    - meta_scope: meta.statement.with.bazel
+    - include: line-continuation-or-pop
+    - match: \b(as)\b
+      scope: keyword.control.flow.with.as.bazel
+      set: with-as
+    - match: ':'
+      scope: punctuation.section.block.with.bazel
+      pop: true
+    - match: ','
+      scope: punctuation.separator.with-resources.bazel
+    - include: expressions
+
+  with-as:
+    - meta_scope: meta.statement.with.bazel
+    - include: line-continuation-or-pop
+    - match: ':'
+      scope: punctuation.section.block.with.bazel
+      pop: true
+    - match: ','
+      scope: punctuation.separator.with-resources.bazel
+      set: with-body
+    - include: name
+    - include: groups
+    - include: lists
+
+  expressions-common:
+    - include: comments
+    - include: constants
+    - include: numbers
+    - include: yields
+    - include: operators
+    - include: lambda
+    - match: \b(await)\b
+      scope: keyword.other.await.bazel
+    - include: inline-if
+    - include: strings
+    - include: function-calls
+    - include: item-access
+    - include: lists
+    - include: dictionaries-and-sets
+    - include: tuples
+    - include: groups
+    - match: \)
+      scope: invalid.illegal.stray.brace.round.bazel
+    - match: \]
+      scope: invalid.illegal.stray.brace.square.bazel
+    - match: \}
+      scope: invalid.illegal.stray.brace.curly.bazel
+    - include: line-continuation
+
+  line-expressions: # Always include this last!
+    - include: expressions-common
+    - include: qualified-name
+
+  expressions: # Always include this last!
+    # Differs from the line scope in that invalid-name matches will pop the current context
+    # and matches accessors continued on a different line
+    - include: expressions-common
+    - include: illegal-names-pop
+    - include: qualified-name
+    - match: '(\.) *(?={{identifier}})'
+      captures:
+        1: punctuation.accessor.dot.bazel
+      push:
+        - include: magic-function-names
+        - include: magic-variable-names
+        - include: illegal-names
+        - include: generic-names
+        - match: ''
+          pop: true
+
+  after-expression:
+    # direct function call
+    - match: '\s*(\()'
+      captures:
+        1: punctuation.section.arguments.begin.bazel
+      push:
+        - meta_scope: meta.function-call.arguments.bazel
+        - match: \)
+          scope: punctuation.section.arguments.end.bazel
+          pop: true
+        - include: arguments
+    # item access
+    - match: '\s*(\[)'
+      captures:
+        1: meta.item-access.bazel punctuation.section.brackets.begin.bazel
+      push:
+        - meta_content_scope: meta.item-access.arguments.bazel
+        - match: \]
+          scope: meta.item-access.bazel punctuation.section.brackets.end.bazel
+          pop: true
+        - match: ':'
+          scope: punctuation.separator.slice.bazel
+        - include: expressions
+    # indirect function call following attribute access
+    - include: function-calls
+    # arbitrary attribute access
+    - match: '\s*(\.)'
+      captures:
+        1: punctuation.accessor.dot.bazel
+      push:
+        - include: magic-function-names
+        - include: magic-variable-names
+        - include: illegal-names
+        - include: generic-names
+        - match: ''
+          pop: true
+    - match: ''
+      pop: true
+
+  closing-list:
+    - match: '\s*\]'
+      set: after-expression
+    - match: '[^\s\]]*'
+      scope: invalid.illegal.expected-coma.bazel
+
+  comments:
+    - match: "#"
+      scope: punctuation.definition.comment.bazel
+      push:
+        - meta_scope: comment.line.number-sign.bazel
+        - match: \n
+          pop: true
+
+  constants:
+    - match: \b(None|True|False|Ellipsis|NotImplemented|__debug__)\b
+      scope: constant.language.bazel
+    - match: \.{3}(?!\w)
+      scope: constant.language.bazel
+
+  numbers:
+    # https://docs.bazel.org/3/reference/lexical_analysis.html#numeric-literals
+    # hexadecimal
+    - match: \b(?i)(0x)\h*(L) # py2
+      scope: constant.numeric.integer.long.hexadecimal.bazel
+      captures:
+        1: punctuation.definition.numeric.hexadecimal.bazel
+        2: storage.type.numeric.long.bazel
+    - match: \b(?i)(0x)(_?\h)+
+      scope: constant.numeric.integer.hexadecimal.bazel
+      captures:
+        1: punctuation.definition.numeric.hexadecimal.bazel
+    # octal
+    - match: \b(?i)(0o?)(?=o|[0-7])[0-7]*(L) # py2
+      scope: constant.numeric.integer.long.octal.bazel
+      captures:
+        1: punctuation.definition.integer.octal.bazel
+        2: storage.type.numeric.long.bazel
+    - match: \b(?i)(0)[0-7]+ # py2
+      scope: constant.numeric.integer.octal.bazel
+      captures:
+        1: punctuation.definition.numeric.octal.bazel
+    - match: \b(?i)(0o)(_?[0-7])+
+      scope: constant.numeric.integer.octal.bazel
+      captures:
+        1: punctuation.definition.numeric.octal.bazel
+    # binary
+    - match: \b(?i)(0b)[01]*(L) # py2
+      scope: constant.numeric.integer.long.binary.bazel
+      captures:
+        1: punctuation.definition.numeric.binary.bazel
+        2: storage.type.numeric.long.bazel
+    - match: \b(?i)(0b)(_?[01])*
+      scope: constant.numeric.integer.binary.bazel
+      captures:
+        1: punctuation.definition.numeric.binary.bazel
+    # complex
+    - match: (?i){{digitpart}}?(\.){{digitpart}}(?:e[\-\+]?{{digitpart}})?(j) # mandatory fraction
+      scope: constant.numeric.complex.bazel
+      captures:
+        1: punctuation.separator.decimal.bazel
+        2: storage.type.numeric.complex.bazel
+    - match: \b(?i)(?:{{digitpart}}(?:(\.){{digitpart}}?)?|(\.){{digitpart}})(?:e[\-\+]?{{digitpart}})(j) # mandatory exponent
+      scope: constant.numeric.complex.bazel
+      captures:
+        1: punctuation.separator.decimal.bazel
+        2: punctuation.separator.decimal.bazel
+        3: storage.type.numeric.complex.bazel
+    - match: (?i){{digitpart}}(\.)?(j) # mandatory digitpart
+      scope: constant.numeric.complex.bazel
+      captures:
+        1: punctuation.separator.decimal.bazel
+        2: storage.type.numeric.complex.bazel
+    # floating point
+    - match: (?i){{digitpart}}?(\.){{digitpart}}(?:e[\-\+]?{{digitpart}})? # mandatory fraction
+      scope: constant.numeric.float.bazel
+      captures:
+        1: punctuation.separator.decimal.bazel
+    - match: \b(?i)(?:{{digitpart}}(?:(\.){{digitpart}}?)?|(\.){{digitpart}})(?:e[\-\+]?{{digitpart}}) # mandatory exponent
+      scope: constant.numeric.float.bazel
+      captures:
+        1: punctuation.separator.decimal.bazel
+        2: punctuation.separator.decimal.bazel
+    - match: (?i){{digitpart}}(\.) # mandatory digitpart
+      scope: constant.numeric.float.bazel
+      captures:
+        1: punctuation.separator.decimal.bazel
+    # integer
+    - match: \b(?i)(?:[1-9]\d*|0)(L)\b # py2
+      scope: constant.numeric.integer.long.decimal.bazel
+      captures:
+        1: storage.type.numeric.long.bazel
+    - match: \b(?i)([1-9][\d_]*|0)\b
+      scope: constant.numeric.integer.decimal.bazel
+
+  modifiers:
+    - match: \b(?:(global)|(nonlocal))\b
+      captures:
+        1: storage.modifier.global.bazel
+        2: storage.modifier.nonlocal.bazel
+      push:
+        - include: line-continuation-or-pop
+        - match: ','
+          scope: punctuation.separator.storage-list.bazel
+        - include: name
+        - match: \S+
+          scope: invalid.illegal.name.storage.bazel
+
+  yields:
+    - match: \b(yield)(?:\s+(from))?\b
+      captures:
+        1: keyword.control.flow.yield.bazel
+        2: keyword.control.flow.yield-from.bazel
+
+  assignments:
+    - match: \+=|-=|\*=|/=|//=|%=|@=|&=|\|=|\^=|>>=|<<=|\*\*=
+      scope: keyword.operator.assignment.augmented.bazel
+    - match: '=(?!=)'
+      scope: keyword.operator.assignment.bazel
+
+  operators:
+    - match: <>
+      scope: invalid.deprecated.operator.bazel
+    - match: <\=|>\=|\=\=|<|>|\!\=
+      scope: keyword.operator.comparison.bazel
+    - match: \+|\-|\*|\*\*|/|//|%|<<|>>|&|\||\^|~
+      scope: keyword.operator.arithmetic.bazel
+    - match: \b(and|in|is|not|or)\b
+      comment: keyword operators that evaluate to True or False
+      scope: keyword.operator.logical.bazel
+    - match: '@'
+      scope: keyword.operator.matrix.bazel
+
+  allow-unpack-operators:
+    # Match unpacking operators, if present
+    - include: comments
+    - match: \*{3,}
+      scope: invalid.illegal.syntax.bazel
+      pop: true
+    - match: \*\*
+      scope: keyword.operator.unpacking.mapping.bazel
+      pop: true
+    - match: \*
+      scope: keyword.operator.unpacking.sequence.bazel
+      pop: true
+    - match: (?=\S)
+      pop: true
+
+  classes:
+    - match: '^\s*(class)\b'
+      captures:
+        1: storage.type.class.bazel
+      push:
+        - meta_scope: meta.class.bazel
+        - include: line-continuation-or-pop
+        - match: ':'
+          scope: punctuation.section.class.begin.bazel
+          pop: true
+        - match: "(?={{identifier}})"
+          push:
+            - meta_content_scope: entity.name.class.bazel
+            - include: entity-name-class
+            - match: ''
+              pop: true
+        - match: \(
+          scope: punctuation.section.inheritance.begin.bazel
+          set:
+            - meta_scope: meta.class.inheritance.bazel
+            - match: \)
+              scope: punctuation.section.inheritance.end.bazel
+              set:
+                - include: line-continuation-or-pop
+                - match: ':'
+                  scope: meta.class.bazel punctuation.section.class.begin.bazel
+                  pop: true
+                - match: (?=\S)
+                  pop: true
+            - match: ':'
+              scope: invalid.illegal.no-closing-parens.bazel
+              pop: true
+            - match: ','
+              scope: punctuation.separator.inheritance.bazel
+            - include: illegal-names-pop
+            - match: ({{identifier}}) *(=)
+              captures:
+                1: variable.parameter.class-inheritance.bazel
+                2: keyword.operator.assignment.bazel
+            - match: (?={{path}})
+              push:
+                - meta_scope: entity.other.inherited-class.bazel
+                - match: '{{identifier}}(?: *(\.) *)?'
+                  captures:
+                    1: punctuation.accessor.dot.bazel
+                - match: ''
+                  pop: true
+            - include: expressions
+
+  functions:
+    - match: '^\s*(?:(async)\s+)?(def)\b'
+      captures:
+        1: storage.modifier.async.bazel
+        2: storage.type.function.bazel
+      push:
+        - meta_scope: meta.function.bazel
+        - include: line-continuation-or-pop
+        - match: ':'
+          scope: punctuation.section.function.begin.bazel
+          pop: true
+        - match: "(?={{identifier}})"
+          push:
+            - meta_content_scope: entity.name.function.bazel
+            - include: entity-name-function
+            - match: ''
+              pop: true
+        - match: '(?=\()'
+          set:
+            - match: \(
+              scope: meta.function.parameters.bazel punctuation.section.parameters.begin.bazel
+              set: [function-parameters, allow-unpack-operators]
+
+  function-parameters:
+    - meta_content_scope: meta.function.parameters.bazel
+    - match: \)
+      scope: punctuation.section.parameters.end.bazel
+      set: function-after-parameters
+    - include: comments
+    - match: ','
+      scope: punctuation.separator.parameters.bazel
+      push: allow-unpack-operators
+    - match: '(?==)'
+      set:
+        - match: '='
+          scope: keyword.operator.assignment.bazel
+          set:
+            - meta_scope: meta.function.parameters.default-value.bazel
+            - match: '(?=[,)])'
+              set: [function-parameters, allow-unpack-operators]
+            - include: expressions
+    - match: '(?=:)'
+      set:
+        - match: ':'
+          scope: punctuation.separator.annotation.parameter.bazel
+          set:
+            - meta_scope: meta.function.parameters.annotation.bazel
+            - match: '(?=[,)=])'
+              set: function-parameters
+            - include: expressions
+    - include: function-parameters-tuple
+    - include: illegal-names
+    - match: '{{identifier}}'
+      scope: variable.parameter.bazel
+    - include: line-continuation
+
+  function-parameters-tuple:
+    - match: \(
+      scope: punctuation.section.group.begin.bazel
+      push:
+        - meta_scope: meta.group.bazel
+        - match: \)
+          scope: punctuation.section.group.end.bazel
+          set: after-expression
+        - include: comments
+        - match: ','
+          scope: punctuation.separator.parameters.bazel
+          push: allow-unpack-operators
+        # default values should follow the argument
+        - match: '='
+          push:
+            - meta_scope: invalid.illegal.default-value.bazel
+            - match: '(?=[,)=])'
+              pop: true
+        # bazel 2 does not support type annotations
+        - match: '(?=:)'
+          push:
+            - meta_scope: invalid.illegal.annotation.bazel
+            - match: '(?=[,)=])'
+              pop: true
+        - include: illegal-names
+        - match: '{{identifier}}'
+          scope: variable.parameter.bazel
+        - include: line-continuation
+
+  function-after-parameters:
+    - meta_content_scope: meta.function.bazel
+    - match: '(?=->)'
+      set:
+        - meta_content_scope: meta.function.annotation.return.bazel
+        - match: ->
+          scope: punctuation.separator.annotation.return.bazel
+        - match: '(?=:)'
+          set: function-after-parameters
+        - include: line-continuation-or-pop
+        - include: expressions
+    - match: ':'
+      scope: meta.function.bazel punctuation.section.function.begin.bazel
+      pop: true
+    - include: comments
+    - match: (?=\S)
+      pop: true
+
+  decorators:
+    - match: ^\s*(?=@)
+      push:
+        # Due to line continuations, we don't know whether this is a "function call" yet
+        - meta_content_scope: meta.annotation.bazel
+        - match: '@'
+          scope: punctuation.definition.annotation.bazel
+        - match: $
+          pop: true
+        - include: line-continuation-or-pop
+        - match: (?=\.?\s*{{path}}\s*\() # now we do
+          set: [decorator-function-call-wrapper, qualified-name-until-leaf]
+        - match: (?=\.?\s*{{path}})
+          push: [decorator-wrapper, qualified-name-until-leaf]
+        - match: \S
+          scope: invalid.illegal.character.bazel
+          pop: true
+
+  decorator-wrapper:
+    - match: (\.)\s*
+      captures:
+        1: punctuation.accessor.dot.bazel
+      set:
+        - meta_scope: meta.qualified-name.bazel
+        - meta_content_scope: variable.annotation.bazel
+        - include: dotted-name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+    - match: ''
+      set:
+        - meta_scope: meta.qualified-name.bazel variable.annotation.bazel
+        - include: name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+
+  decorator-function-call-wrapper:
+    - meta_scope: meta.annotation.function.bazel
+    - match: \)
+      scope: punctuation.section.arguments.end.bazel
+      set: after-expression
+    - match: \(
+      scope: meta.annotation.function.bazel punctuation.section.arguments.begin.bazel
+      push:
+        - clear_scopes: 1
+        - meta_content_scope: meta.annotation.arguments.bazel
+        - match: (?=\))
+          pop: true
+        - include: arguments
+    - match: (\.)\s*
+      captures:
+        1: punctuation.accessor.dot.bazel
+      push:
+        - meta_scope: meta.qualified-name.bazel
+        - meta_content_scope: variable.annotation.function.bazel
+        - include: dotted-name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+    - match: ''
+      push:
+        - meta_scope: meta.qualified-name.bazel variable.annotation.function.bazel
+        - include: name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+
+  item-access:
+    - match: '(?={{path}}\s*\[)'
+      push:
+        - match: \]
+          scope: meta.item-access.bazel punctuation.section.brackets.end.bazel
+          set: after-expression
+        - match: '(?={{path}}\s*\[)'
+          push:
+            - meta_content_scope: meta.item-access.bazel
+            - match: '(?=\s*\[)'
+              pop: true
+            - include: qualified-name
+        - match: \[
+          scope: meta.item-access.bazel punctuation.section.brackets.begin.bazel
+          push:
+            - meta_content_scope: meta.item-access.arguments.bazel
+            - match: '(?=\])'
+              pop: true
+            - match: ':'
+              scope: punctuation.separator.slice.bazel
+            - include: expressions
+
+  function-calls:
+    - match: '(?=(\.\s*)?{{path}}\s*\()'
+      push: [function-call-wrapper, qualified-name-until-leaf]
+
+  function-call-wrapper:
+    - meta_scope: meta.function-call.bazel
+    - match: (?=\()  # need to remove meta.function-call.bazel from opening parens
+      set:
+        - match: \(
+          scope: punctuation.section.arguments.begin.bazel
+          set:
+            - meta_scope: meta.function-call.arguments.bazel
+            - match: \)
+              scope: punctuation.section.arguments.end.bazel
+              set: after-expression
+            - include: arguments
+    - match: (\.)\s*(?={{identifier}})
+      captures:
+        1: punctuation.accessor.dot.bazel
+      push:
+        - meta_scope: meta.qualified-name.bazel
+        - meta_content_scope: variable.function.bazel
+        - include: dotted-name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+    - match: (?={{identifier}})
+      push:
+        - meta_scope: meta.qualified-name.bazel variable.function.bazel
+        - include: name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+
+  arguments:
+    - include: keyword-arguments
+    - match: ','
+      scope: punctuation.separator.arguments.bazel
+      push: allow-unpack-operators
+    - include: inline-for
+    - include: expressions
+
+  keyword-arguments:
+    - match: '(?={{identifier}}\s*=(?!=))'
+      push:
+        - include: line-continuation-or-pop
+        - match: '='
+          scope: keyword.operator.assignment.bazel
+          set:
+            - match: (?=\s*[,):])
+              pop: true
+            - include: expressions
+        - include: illegal-names
+        - match: '{{identifier}}'
+          scope: variable.parameter.bazel
+
+  lambda:
+    - match: \b(lambda)(?=\s|:|$)
+      scope: storage.type.function.inline.bazel
+      push: [lambda-parameters, allow-unpack-operators]
+
+  lambda-parameters:
+    - meta_scope: meta.function.inline.bazel
+    - meta_content_scope: meta.function.inline.parameters.bazel
+    - include: line-continuation-or-pop
+    - match: '\:'
+      scope: punctuation.section.function.begin.bazel
+      pop: true
+    - match: ','
+      scope: punctuation.separator.parameters.bazel
+      push: allow-unpack-operators
+    - include: keyword-arguments
+    - include: function-parameters-tuple
+    - include: illegal-names
+    - match: '{{identifier}}'
+      scope: variable.parameter.bazel
+    - match: '\S'
+      scope: invalid.illegal.expected-parameter.bazel
+
+  groups:
+    - match: \(
+      scope: punctuation.section.group.begin.bazel
+      push:
+        - meta_scope: meta.group.bazel
+        - match: \)
+          scope: punctuation.section.group.end.bazel
+          set: after-expression
+        - match: ','
+          scope: punctuation.separator.tuple.bazel
+        - include: inline-for
+        - include: expressions
+
+  tuples:
+    # We don't know for certain, whether a parenthesized expression is a tuple,
+    # so try looking ahead.
+    - match: (\()\s*(\))
+      scope: meta.sequence.tuple.empty.bazel
+      captures:
+        1: punctuation.section.sequence.begin.bazel
+        2: punctuation.section.sequence.end.bazel
+      push: after-expression
+    - match: \((?={{simple_expression}},|\s*\*{{path}})
+      scope: punctuation.section.sequence.begin.bazel
+      push: inside-tuple
+    # TODO generator
+    # - match: \((?:{{simple_expression}}for)
+
+  inside-tuple:
+    - meta_scope: meta.sequence.tuple.bazel
+    - match: \)
+      scope: punctuation.section.sequence.end.bazel
+      set: after-expression
+    - match: ','
+      scope: punctuation.separator.sequence.bazel
+      push: allow-unpack-operators
+    - include: inline-for
+    - include: expressions
+
+  lists:
+    - match: (\[)\s*(\])
+      scope: meta.sequence.list.empty.bazel
+      captures:
+        1: punctuation.section.sequence.begin.bazel
+        2: punctuation.section.sequence.end.bazel
+      push: after-expression
+    - match: \[
+      scope: punctuation.section.sequence.begin.bazel
+      push: [inside-list, allow-unpack-operators]
+
+  inside-list:
+    - meta_scope: meta.sequence.list.bazel
+    - match: \s*\]
+      scope: punctuation.section.sequence.end.bazel
+      set: after-expression
+    - match: ','
+      scope: punctuation.separator.sequence.bazel
+      push: allow-unpack-operators
+    - match: '\s'
+      set: closing-list
+    - include: expressions
+
+  dictionaries-and-sets:
+    # Dictionaries and set literals use the same punctuation,
+    # so we try looking ahead to determine whether we have a dict or a set.
+    - match: '(\{)\s*(\})'
+      scope: meta.mapping.empty.bazel
+      captures:
+        1: punctuation.section.mapping.begin.bazel
+        2: punctuation.section.mapping.end.bazel
+      push: after-expression
+    - match: \{(?={{simple_expression}}:|\s*\*\*{{path}})
+      scope: punctuation.section.mapping.begin.bazel
+      push: inside-dictionary
+    - match: \{(?={{simple_expression}}[,}]|\s*\*{{path}})
+      scope: punctuation.section.set.begin.bazel
+      push: inside-set
+    # If the expression is "more complex" or on the next line,
+    # fall back to default and determine later.
+    - match: \{
+      scope: punctuation.section.mapping-or-set.begin.bazel
+      push:
+        - meta_scope: meta.mapping-or-set.bazel
+        - match: \}
+          scope: punctuation.section.mapping-or-set.end.bazel
+          set: after-expression
+        - match: (?={{simple_expression}}:|\s*\*\*{{path}})
+          set: inside-dictionary
+        - match: (?={{simple_expression}}[,}]|\s*\*{{path}})
+          set: inside-set
+        - match: ','
+          scope: punctuation.separator.set.bazel
+          set: inside-set
+        - match: ':'
+          scope: punctuation.separator.mapping.key-value.bazel
+          set: inside-directory-value
+        - include: inline-for
+        - include: expressions
+
+  inside-dictionary:
+    - meta_scope: meta.mapping.bazel
+    - match: \}
+      scope: punctuation.section.mapping.end.bazel
+      set: after-expression
+    - match: ':'
+      scope: punctuation.separator.mapping.key-value.bazel
+      set: inside-directory-value
+    - match: ','
+      scope: invalid.illegal.expected-colon.bazel
+    - match: \*\*
+      scope: keyword.operator.unpacking.mapping.bazel
+      push:
+        - match: (?=\})
+          pop: true
+        - match: ','
+          scope: punctuation.separator.mapping.bazel
+          pop: true
+        - include: expressions
+    - include: comments
+    - match: (?=\S)
+      push:
+        - clear_scopes: 1
+        - meta_scope: meta.mapping.key.bazel
+        - match: \s*(?=\}|,|:)
+          pop: true
+        - include: expressions
+
+  inside-directory-value:
+    - meta_content_scope: meta.mapping.bazel
+    - match: \}
+      scope: punctuation.section.mapping.end.bazel
+      set: after-expression
+    - match: (?=,)
+      set:
+        # clear meta scope from this match, because 'inside-directory' has it in meta_scope
+        - match: ','
+          scope: punctuation.separator.mapping.bazel
+          set: inside-dictionary
+    - match: (?=for\b)
+      push:
+        - match: (?=\})
+          pop: true
+        - match: ','
+          scope: invalid.illegal.unexpected-comma.bazel
+        - include: inline-for
+        - include: expressions
+    - include: comments
+    - match: (?=\S)
+      push:
+        - clear_scopes: 1
+        - meta_content_scope: meta.mapping.value.bazel
+        - match: (?=\s*(\}|,|for\b))
+          pop: true
+        - include: expressions
+
+  inside-set:
+    - meta_scope: meta.set.bazel
+    - match: \}
+      scope: punctuation.section.set.end.bazel
+      set: after-expression
+    - match: ':'
+      scope: invalid.illegal.colon-inside-set.bazel
+    - match: ','
+      scope: punctuation.separator.set.bazel
+    - match: \*
+      scope: keyword.operator.unpacking.sequence.bazel
+      push:
+        - match: (?=\})
+          pop: true
+        - match: ','
+          scope: punctuation.separator.set.bazel
+          pop: true
+        - include: expressions
+    - include: inline-for
+    - include: expressions
+
+  builtin-exceptions:
+    - match: |-
+        (?x)\b(
+        	(
+        		Arithmetic|Assertion|Attribute|BlockingIO|BrokenPipe|Buffer|ChildProcess|
+        		Connection(Aborted|Refused|Reset)?|EOF|Environment|FileExists|
+        		FileNotFound|FloatingPoint|Interrupted|IO|IsADirectoryError|
+        		Import|Indentation|Index|Key|Lookup|Memory|Name|NotADirectory|
+        		NotImplemented|OS|Overflow|Permission|ProcessLookup|Reference|
+        		Runtime|Standard|Syntax|System|Tab|Timeout|Type|UnboundLocal|
+        		Unicode(Encode|Decode|Translate)?|Value|VMS|Windows|ZeroDivision
+        	)Error|
+        	((Pending)?Deprecation|Runtime|Syntax|User|Future|Import|Unicode|Bytes)?Warning|
+        	(Base)?Exception|
+        	SystemExit|StopIteration|NotImplemented|KeyboardInterrupt|GeneratorExit
+        )\b
+      scope: support.type.exception.bazel
+
+  builtin-functions:
+    - match: |-
+        (?x)\b(
+        	__import__|all|abs|any|apply|ascii|bin|breakpoint|callable|chr|classmethod|cmp|coerce|
+        	compile|delattr|dir|divmod|enumerate|eval|exec|execfile|filter|format|getattr|
+        	globals|hasattr|hash|help|hex|id|input|intern|isinstance|issubclass|iter|
+        	len|locals|map|max|min|next|oct|open|ord|pow|print|property|range|
+        	raw_input|reduce|reload|repr|reversed|round|setattr|sorted|staticmethod|
+        	sum|super|type|unichr|vars|zip
+        )\b
+      scope: support.function.builtin.bazel
+
+  builtin-types:
+    - match: |-
+        (?x)\b(
+        	basestring|bool|buffer|bytearray|bytes|complex|dict|float|frozenset|int|
+        	list|long|memoryview|object|range|set|slice|str|tuple|unicode|xrange
+        )\b
+      scope: support.type.bazel
+
+  name:
+    - match: '(?={{identifier}})'
+      push:
+        - include: name-specials
+        - match: '{{identifier_constant}}'
+          scope: variable.other.constant.bazel
+        - include: generic-names
+        - match: ''
+          pop: true
+
+  dotted-name:
+    - match: '\s*(\.)\s*(?={{identifier}})'
+      captures:
+        1: punctuation.accessor.dot.bazel
+      push:
+        - include: dotted-name-specials
+        - match: '{{identifier_constant}}'
+          scope: variable.other.constant.bazel
+        - include: generic-names
+        - match: ''
+          pop: true
+
+  qualified-name:
+    - match: '(?={{path}})'
+      push:
+        - meta_scope: meta.qualified-name.bazel
+        - include: name
+        - include: dotted-name
+        - match: ''
+          pop: true
+
+  qualified-name-until-leaf:
+    # Push this together with another context to match a qualified name
+    # until the last non-special identifier (if any).
+    # This allows the leaf to be scoped individually.
+    - meta_scope: meta.qualified-name.bazel
+    # If a line continuation follows, this may or may not be the last leaf (most likley not though)
+    - match: (?={{identifier}}\s*(\.|\\))
+      push:
+        - include: name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+    - match: (\.)\s*(?={{identifier}}\s*(\.|\\))
+      captures:
+        1: punctuation.accessor.dot.bazel
+      push:
+        - include: dotted-name-specials
+        - include: generic-names
+        - match: ''
+          pop: true
+    - match: \.(?!\s*{{identifier}})  # don't match last dot
+      scope: punctuation.accessor.dot.bazel
+    - match: (?=\S|$)
+      pop: true
+
+  name-specials:
+    - include: builtin-functions
+    - include: builtin-types
+    - include: builtin-exceptions
+    - include: illegal-names
+    - include: magic-function-names
+    - include: magic-variable-names
+    - include: language-variables
+
+  dotted-name-specials:
+    - include: magic-function-names
+    - include: magic-variable-names
+    - include: illegal-names
+
+  entity-name-class:
+    - include: illegal-names
+    - include: generic-names
+
+  entity-name-function:
+    - include: magic-function-names
+    - include: illegal-names
+    - include: generic-names
+
+  generic-names:
+    - match: '{{identifier}}'
+      scope: meta.generic-name.bazel
+
+  illegal-names:
+    - match: \b{{illegal_names}}\b
+      scope: invalid.illegal.name.bazel
+
+  illegal-names-pop:
+    - match: \b{{illegal_names}}\b
+      scope: invalid.illegal.name.bazel
+      pop: true
+
+  language-variables:
+    - match: \b(self|cls)\b
+      scope: variable.language.bazel
+    - match: _(?!{{identifier_continue}})
+      scope: variable.language.bazel
+
+  line-continuation:
+    - match: (\\)(.*)$\n?
+      captures:
+        1: punctuation.separator.continuation.line.bazel
+        2: invalid.illegal.unexpected-text.bazel
+    # make sure to resume parsing at next line
+      push:
+        # This prevents strings after a continuation from being a docstring
+        - include: strings
+        - match: (?=\S|^\s*$|\n)  # '\n' for when we matched a string earlier
+          pop: true
+
+  line-continuation-or-pop:
+    - include: line-continuation
+    - match: (?=\s*($|;|#))
+      pop: true
+
+  magic-function-names:
+    # https://docs.bazel.org/2/reference/datamodel.html
+    # https://docs.bazel.org/3/reference/datamodel.html
+    - match: |-
+        (?x)\b__(?:
+          # unary operators
+          invert|neg|pos|abs|
+          # binary operators
+          add|and|div|divmod|floordiv|lshift|mod|mul|or|pow|rshift|sub|truediv|xor|
+          contains|
+          # right-hand binary operators
+          radd|rand|rdiv|rdivmod|rfloordiv|rlshift|rmod|rmul|ror|rpow|rrshift|rsub|rtruediv|rxor|
+          # in-place operator assignments
+          iadd|iand|idiv|ifloordiv|ilshift|imod|imul|ior|ipow|irshift|isub|itruediv|ixor|
+          # comparisons
+          eq|ge|gt|le|lt|ne|
+          cmp|rcmp| # py2
+          # primary coercion
+          bool|str|
+          nonzero|unicode| # py2
+          # number coercion (converts something to a number)
+          bytes|complex|float|index|int|round|
+          long| # py2
+          # other "coercion"
+          format|len|length_hint|hash|repr|reversed|
+          coerce|hex|oct| # py2
+          fspath|
+          # iterator (and 'await')
+          iter|next|
+          aiter|anext|
+          await|
+          # attribute and item access
+          delattr|delitem|delslice|
+          getattr|getattribute|getitem|getslice|
+          setattr|setitem|setslice|
+          dir|missing|
+          # context manager
+          enter|exit|
+          aenter|aexit|
+          # other class magic
+          call|del|init|new|init_subclass|
+          instancecheck|subclasscheck|
+          # pickling
+          getnewargs|getnewargs_ex|getstate|setstate|reduce|reduce_ex|
+          # descriptors
+          delete|get|set|set_name|
+          # class-specific
+          subclasses|
+          # dataclasses (PEP 557)
+          post_init|
+          # for typing core support (PEP 560)
+          class_getitem|mro_entries
+        )__\b
+      comment: these methods have magic interpretation by bazel and are generally called indirectly through syntactic constructs
+      scope: support.function.magic.bazel
+
+  magic-variable-names:
+    # magic variables which a class/module/object may have.
+    # https://docs.bazel.org/3/library/inspect.html#types-and-members
+    # https://docs.bazel.org/3/reference/datamodel.html#object.__slots__
+    # https://docs.bazel.org/3/reference/datamodel.html#preparing-the-class-namespace
+    - match: |-
+        (?x)\b__(?:
+          # generic object
+          class|dict|doc|module|name|
+          # module-specific / global
+          all|file|package|
+          # functions & methods
+          annotations|closure|code|defaults|func|globals|kwdefaults|self|qualname|
+          # classes (attributes)
+          bases|prepare|slots|metaclass|mro|
+          # bazel 2
+          members|methods
+        )__\b
+      scope: support.variable.magic.bazel
+
+  docstrings:
+    - match: ^\s*(?=(?i)(ur|ru|u|r)?("""|'''))
+      push:
+      - match: (?i)(u)?("""|''')
+        captures:
+          1: storage.type.string.bazel
+          2: punctuation.definition.comment.begin.bazel
+        set:
+          - meta_scope: comment.block.documentation.bazel
+          - include: escaped-unicode-char
+          - include: escaped-char
+          - match: '\2'
+            scope: punctuation.definition.comment.end.bazel
+            pop: true
+      - match: (?i)(u?ru?)("""|''')
+        captures:
+          1: storage.type.string.bazel
+          2: punctuation.definition.comment.begin.bazel
+        set:
+          - meta_scope: comment.block.documentation.bazel
+          - match: '\2'
+            scope: punctuation.definition.comment.end.bazel
+            pop: true
+
+  escaped-char:
+    - match: '(\\x\h{2})|(\\[0-7]{3})|(\\[\\"''abfnrtv])'
+      captures:
+        1: constant.character.escape.hex.bazel
+        2: constant.character.escape.octal.bazel
+        3: constant.character.escape.bazel
+    - match: \\.  # deprecated in 3.6 and will eventually be a syntax error
+      scope: invalid.deprecated.character.escape.bazel
+
+  escaped-unicode-char:
+    - match: '(\\U\h{8})|(\\u\h{4})|(\\N\{[a-zA-Z ]+\})'
+      captures:
+        1: constant.character.escape.unicode.16-bit-hex.bazel
+        2: constant.character.escape.unicode.32-bit-hex.bazel
+        3: constant.character.escape.unicode.name.bazel
+
+  line-continuation-inside-string:
+    - match: (\\)$\n?
+      captures:
+        1: punctuation.separator.continuation.line.bazel
+    - match: \n
+      scope: invalid.illegal.unclosed-string.bazel
+      set: after-expression
+
+  constant-placeholder:
+    - match: |- # printf style
+        (?x)
+        %
+          ( \( ({{identifier}}) \) )? # mapping key
+          \#?            # alternate form
+          0?             # pad with zeros
+          \-?            # left-adjust
+          \ ?            # implicit sign
+          [+-]?          # sign
+          (\d*|\*)       # width
+          (\. (\d*|\*))? # precision
+          [hlL]?         # length modifier (but ignored)
+          [acdeEfFgGiorsuxX%]
+      scope: constant.other.placeholder.bazel
+      captures:
+        2: variable.other.placeholder.bazel
+    - match: '{{strftime_spec}}'
+      scope: constant.other.placeholder.bazel
+    - match: '\{\{|\}\}'
+      scope: constant.character.escape.bazel
+    - include: formatting-syntax
+
+  formatting-syntax:
+    # https://docs.bazel.org/3.6/library/string.html#formatstrings
+    - match: |- # simple form
+        (?x)
+        (\{)
+          (?: [\w.\[\]]+)?             # field_name
+          (   ! [ars])?                # conversion
+          (   : (?:{{format_spec}}|    # format_spec OR
+                   [^}%]*%.[^}]*)      # any format-like string
+          )?
+        (\})
+      scope: constant.other.placeholder.bazel
+      captures:
+        1: punctuation.definition.placeholder.begin.bazel
+        2: storage.modifier.conversion.bazel
+        3: constant.other.format-spec.bazel
+        4: punctuation.definition.placeholder.end.bazel
+    - match: \{(?=[^\}"']+\{[^"']*\}) # complex (nested) form
+      scope: punctuation.definition.placeholder.begin.bazel
+      push:
+        - meta_scope: constant.other.placeholder.bazel
+        - match: \}
+          scope: punctuation.definition.placeholder.end.bazel
+          pop: true
+        - match: '[\w.\[\]]+'
+        - match: '![ars]'
+          scope: storage.modifier.conversion.bazel
+        - match: ':'
+          push:
+            - meta_scope: meta.format-spec.bazel constant.other.format-spec.bazel
+            - match: (?=\})
+              pop: true
+            - include: formatting-syntax
+
+  f-string-content:
+    # https://www.bazel.org/dev/peps/pep-0498/
+    # https://docs.bazel.org/3.6/reference/lexical_analysis.html#f-strings
+    - match: \{\{|\}\}
+      scope: constant.character.escape.bazel
+    - match: \{\s*\}
+      scope: invalid.illegal.empty-expression.bazel
+    - match: (?=\{)
+      push: f-string-replacement
+    - match: \}
+      scope: invalid.illegal.stray-brace.bazel
+
+  f-string-content-reset:
+    # Same as f-string-content, but will reset the entire scope stack
+    - match: \{\{|\}\}
+      scope: constant.character.escape.bazel
+    - match: \{\s*\}
+      scope: invalid.illegal.empty-expression.bazel
+    - match: (?=\{)
+      push: f-string-replacement-reset
+    - match: \}
+      scope: invalid.illegal.stray-brace.bazel
+
+  f-string-replacement:
+    - clear_scopes: 1
+    - match: \}
+      scope: meta.interpolation.bazel punctuation.section.interpolation.end.bazel
+      pop: true
+    - match: \{
+      scope: punctuation.section.interpolation.begin.bazel
+      push:
+        - meta_scope: meta.interpolation.bazel
+        - match: (?=\})
+          pop: true
+        - match: '![ars]'
+          scope: storage.modifier.conversion.bazel
+        - match: ':'
+          push:
+            - meta_scope: meta.format-spec.bazel constant.other.format-spec.bazel
+            # Because replacements can also be used *within* the format-spec,
+            # basically any character is valid and matching {{format_spec}} is useless.
+            # - match: '{{format_spec}}'
+            - match: (?=\})
+              pop: true
+            - include: f-string-content
+        - match: ''
+          push:
+            - meta_content_scope: source.bazel.embedded
+            - match: (?=![^=]|:|\})
+              pop: true
+            - match: \\
+              scope: invalid.illegal.backslash-in-fstring.bazel
+            - include: inline-for
+            - include: expressions
+
+  f-string-replacement-reset:
+    # Same as f-string-replacement, but with clear_scopes: true
+    - clear_scopes: true
+    - meta_scope: source.bazel meta.string.interpolated.bazel
+    - match: \}
+      scope: meta.interpolation.bazel punctuation.section.interpolation.end.bazel
+      pop: true
+    - match: \{
+      scope: punctuation.section.interpolation.begin.bazel
+      push:
+        - meta_scope: meta.interpolation.bazel
+        - match: (?=\})
+          pop: true
+        - match: '![ars]'
+          scope: storage.modifier.conversion.bazel
+        - match: ':'
+          push:
+            - meta_scope: meta.format-spec.bazel constant.other.format-spec.bazel
+            - match: (?=\})
+              pop: true
+            - include: f-string-content
+        - match: ''
+          push:
+            - meta_content_scope: source.bazel.embedded
+            - match: (?=![^=]|:|\})
+              pop: true
+            - match: \\
+              scope: invalid.illegal.backslash-in-fstring.bazel
+            - include: inline-for
+            - include: expressions
+
+  string-quoted-double-block:
+    # Triple-quoted capital R raw string, unicode or not, no syntax embedding
+    - match: '([uU]?R)(""")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+    # Triple-quoted capital R raw string, bytes, no syntax embedding
+    - match: '([bB]R|R[bB])(""")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+    # Triple-quoted raw string, unicode or not, will detect SQL, otherwise regex
+    - match: '([uU]?r)(""")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.block.bazel
+        - match: '(?={{sql_indicator}})'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.double.block.bazel
+            - match: '"""'
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - match: ''
+              push: scope:source.sql
+              with_prototype:
+                - match: '(?=""")'
+                  pop: true
+                - include: escaped-unicode-char
+                - include: constant-placeholder
+        - match: '(?=\S)'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.double.block.bazel
+            - match: '"""'
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - match: ''
+              push: scope:source.regexp.bazel
+              with_prototype:
+                - match: '(?=""")'
+                  pop: true
+                - include: escaped-unicode-char
+    # Triple-quoted raw string, bytes, will use regex
+    - match: '([bB]r|r[bB])(""")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - match: ''
+          embed: scope:source.regexp.bazel
+          escape: (?=""")
+    # Triple-quoted raw f-string
+    - match: ([fF]R|R[fF])(""")
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.begin.bazel
+          set: after-expression
+        - include: f-string-content
+    # Triple-quoted raw f-string, treated as regex
+    - match: ([fF]r|r[fF])(""")
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.begin.bazel
+          set: after-expression
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: '(?=""")'
+              pop: true
+            - include: line-continuation-inside-string
+            - include: f-string-content-reset
+    # Triple-quoted f-string
+    - match: ((?i)f|f)(""")
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.begin.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: f-string-content
+    # Triple-quoted string, unicode or not, will detect SQL
+    - match: '([uU]?)(""")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.block.bazel
+        - match: '(?={{sql_indicator}})'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.double.block.bazel
+            - match: '"""'
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - match: ''
+              push: scope:source.sql
+              with_prototype:
+                - match: '(?=""")'
+                  pop: true
+                - include: escaped-unicode-char
+                - include: escaped-char
+                - include: constant-placeholder
+        - match: '(?=\S)'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.double.block.bazel
+            - match: '"""'
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - include: escaped-unicode-char
+            - include: escaped-char
+            - include: constant-placeholder
+    # Triple-quoted string, bytes, no syntax embedding
+    - match: '([bB])(""")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.block.bazel
+        - match: '"""'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-char
+        - include: constant-placeholder
+
+  string-quoted-double:
+    # Single-line capital R raw string, unicode or not, no syntax embedding
+    - match: '([uU]?R)(")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+    # Single-line capital R raw string, bytes, no syntax embedding
+    - match: '([bB]R|R[bB])(")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+    # Single-line raw string, unicode or not, starting with a SQL keyword
+    - match: '([uU]?r)(")(?={{sql_indicator}})'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.sql
+          with_prototype:
+            - match: '(?="|\n)'
+              pop: true
+            - include: constant-placeholder
+            - include: line-continuation-inside-string
+    # Single-line raw string, unicode or not, treated as regex
+    - match: '([uU]?r)(")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: '(?="|\n)'
+              pop: true
+            - include: line-continuation-inside-string
+    # Single-line raw string, bytes, treated as regex
+    - match: '([bB]r|r[bB])(")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          embed: scope:source.regexp.bazel
+          escape: (?="|\n)
+    # Single-line raw f-string
+    - match: (R[fF]|[fF]R)(")
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - include: f-string-content
+    # Single-line raw f-string, treated as regex
+    - match: (r[fF]|[fF]r)(")
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: '(?="|\n)'
+              pop: true
+            - include: line-continuation-inside-string
+            - include: f-string-content-reset
+    # Single-line f-string
+    - match: ((?i)f|f)(")
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: line-continuation-inside-string
+        - include: f-string-content
+    # Single-line string, unicode or not, starting with a SQL keyword
+    - match: '([uU]?)(")(?={{sql_indicator}})'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.sql
+          with_prototype:
+            - match: '(?="|\n)'
+              pop: true
+            - include: escaped-unicode-char
+            - include: escaped-char
+            - include: line-continuation-inside-string
+            - include: constant-placeholder
+    # Single-line string, unicode or not
+    - match: '([uU]?)(")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: line-continuation-inside-string
+        - include: constant-placeholder
+    # Single-line string, bytes
+    - match: '([bB])(")'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.double.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.double.bazel
+        - match: '"'
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-char
+        - include: line-continuation-inside-string
+        - include: constant-placeholder
+
+  string-quoted-single-block:
+    # Triple-quoted capital R raw string, unicode or not, no syntax embedding
+    - match: ([uU]?R)(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+    # Triple-quoted capital R raw string, bytes, no syntax embedding
+    - match: ([bB]R|R[bB])(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+    # Triple-quoted raw string, unicode or not, will detect SQL, otherwise regex
+    - match: ([uU]?r)(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.block.bazel
+        - match: '(?={{sql_indicator}})'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.single.block.bazel
+            - match: "'''"
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - match: ''
+              push: scope:source.sql
+              with_prototype:
+                - match: (?=''')
+                  pop: true
+                - include: escaped-unicode-char
+                - include: escaped-char
+                - include: constant-placeholder
+        - match: '(?=\S)'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.single.block.bazel
+            - match: "'''"
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - match: ''
+              push: scope:source.regexp.bazel
+              with_prototype:
+                - match: (?=''')
+                  pop: true
+                - include: escaped-unicode-char
+    # Triple-quoted raw string, bytes, will use regex
+    - match: ([bB]r|r[bB])(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - match: ''
+          embed: scope:source.regexp.bazel
+          escape: (?=''')
+    # Triple-quoted raw f-string
+    - match: ([fF]R|R[fF])(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.begin.bazel
+          set: after-expression
+        - include: f-string-content
+    # Triple-quoted raw f-string, treated as regex
+    - match: ([fF]r|r[fF])(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.begin.bazel
+          set: after-expression
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: (?=''')
+              pop: true
+            - include: line-continuation-inside-string
+            - include: f-string-content-reset
+    # Triple-quoted f-string
+    - match: ([fF])(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.begin.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: f-string-content
+    # Triple-quoted string, unicode or not, will detect SQL
+    - match: ([uU]?)(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.block.bazel
+        - match: '(?={{sql_indicator}})'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.single.block.bazel
+            - match: "'''"
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - match: ''
+              push: scope:source.sql
+              with_prototype:
+                - match: (?=''')
+                  pop: true
+                - include: escaped-unicode-char
+                - include: escaped-char
+                - include: constant-placeholder
+        - match: '(?=\S)'
+          set:
+            - meta_scope: meta.string.bazel string.quoted.single.block.bazel
+            - match: "'''"
+              scope: punctuation.definition.string.end.bazel
+              set: after-expression
+            - include: escaped-unicode-char
+            - include: escaped-char
+            - include: constant-placeholder
+    # Triple-quoted string, bytes, no syntax embedding
+    - match: ([bB])(''')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.block.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.block.bazel
+        - match: "'''"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-char
+        - include: constant-placeholder
+
+  string-quoted-single:
+    # Single-line capital R raw string, unicode or not, no syntax embedding
+    - match: '([uU]?R)('')'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+    # Single-line capital R raw string, bytes, no syntax embedding
+    - match: '([bB]R|R[bB])('')'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+    # Single-line raw string, unicode or not, starting with a SQL keyword
+    - match: '([uU]?r)('')(?={{sql_indicator}})'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.sql
+          with_prototype:
+            - match: '(?=''|\n)'
+              pop: true
+            - include: line-continuation-inside-string
+            - include: constant-placeholder
+    # Single-line raw string, unicode or not, treated as regex
+    - match: '([uU]?r)('')'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: '(?=''|\n)'
+              pop: true
+            - include: line-continuation-inside-string
+    # Single-line raw string, bytes, treated as regex
+    - match: '([bB]r|r[bB])('')'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: '(?=''|\n)'
+              pop: true
+            - include: line-continuation-inside-string
+    # Single-line raw f-string
+    - match: ([fF]R|R[fF])(')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - include: f-string-content
+    # Single-line raw f-string, treated as regex
+    - match: ([fF]r|r[fF])(')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.regexp.bazel
+          with_prototype:
+            - match: (?='|\n)
+              pop: true
+            - include: line-continuation-inside-string
+            - include: f-string-content-reset
+    # Single-line f-string
+    - match: ((?i)f|f)(')
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.interpolated.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.interpolated.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: line-continuation-inside-string
+        - include: f-string-content
+    # Single-line string, unicode or not, starting with a SQL keyword
+    - match: '([uU]?)('')(?={{sql_indicator}})'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: line-continuation-inside-string
+        - match: ''
+          push: scope:source.sql
+          with_prototype:
+            - match: '(?=''|\n)'
+              pop: true
+            - include: escaped-unicode-char
+            - include: escaped-char
+            - include: line-continuation-inside-string
+            - include: constant-placeholder
+    # Single-line string, unicode or not
+    - match: '([uU]?)('')'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-unicode-char
+        - include: escaped-char
+        - include: line-continuation-inside-string
+        - include: constant-placeholder
+    # Single-line string, bytes
+    - match: '([bB])('')'
+      captures:
+        1: storage.type.string.bazel
+        2: meta.string.bazel string.quoted.single.bazel punctuation.definition.string.begin.bazel
+      push:
+        - meta_content_scope: meta.string.bazel string.quoted.single.bazel
+        - match: "'"
+          scope: punctuation.definition.string.end.bazel
+          set: after-expression
+        - include: escaped-char
+        - include: line-continuation-inside-string
+        - include: constant-placeholder
+
+  strings:
+    # block versions must be matched first
+    - include: string-quoted-double-block
+    - include: string-quoted-double
+    - include: string-quoted-single-block
+    - include: string-quoted-single
+
+  inline-for:
+    - match: \b(?:(async)\s+)?(for)\b
+      captures:
+        1: storage.modifier.async.bazel
+        2: keyword.control.flow.for.generator.bazel
+      push:
+        - include: comments
+        - meta_scope: meta.expression.generator.bazel
+        - match: \b(in)\b
+          scope: keyword.control.flow.for.in.bazel
+          pop: true
+        - match: '(?=[)\]}])'
+          scope: invalid.illegal.missing-in.bazel
+          pop: true
+        - include: illegal-names-pop
+        - include: target-list
+
+  inline-if:
+    - match: \b(if)\b
+      scope: keyword.control.flow.if.inline.bazel
+    - match: \b(else)\b
+      scope: keyword.control.flow.else.inline.bazel
+
+  target-list:
+    - match: ','
+      scope: punctuation.separator.target-list.bazel
+    - match: \(
+      scope: punctuation.section.target-list.begin.bazel
+      push:
+        - include: comments
+        - match: ','
+          scope: punctuation.separator.target-list.bazel
+        - match: \)
+          scope: punctuation.section.target-list.end.bazel
+          pop: true
+        - include: target-list
+        - include: name
+    - include: name

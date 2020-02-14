@@ -1,0 +1,12 @@
+<snippet>
+  <tabTrigger>cc_library</tabTrigger>
+  <scope>source.bazel</scope>
+  <description>cc_library snippet</description>
+  <content><![CDATA[cc_library(
+  name: "${1:name}",${2:
+  srcs = ["$3"],}${4:
+  hdrs = ["$5"],}${6:
+  deps = ["$7"]}${0}
+)
+  ]]></content>
+</snippet>

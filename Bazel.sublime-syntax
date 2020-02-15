@@ -4,6 +4,7 @@ name: Bazel
 file_extensions:
   - BUILD
   - WORKSPACE
+  - bzl
 scope: source.bazel
 
 variables:

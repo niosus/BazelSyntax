@@ -4,7 +4,7 @@
 	<key>name</key>
 	<string>Miscellaneous</string>
 	<key>scope</key>
-	<string>source.python</string>
+	<string>source.bazel</string>
 	<key>settings</key>
 	<dict>
 		<key>decreaseIndentPattern</key>

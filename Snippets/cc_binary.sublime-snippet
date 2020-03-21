@@ -3,7 +3,7 @@
   <scope>source.bazel</scope>
   <description>cc_binary snippet</description>
   <content><![CDATA[cc_binary(
-  name: "${1:name}",${2:
+  name = "${1:name}",${2:
   srcs = ["$3"],}${4:
   hdrs = ["$5"],}${6:
   deps = ["$7"]}${0}

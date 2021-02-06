@@ -4,6 +4,7 @@ name: Bazel
 file_extensions:
   - BUILD
   - WORKSPACE
+  - bazel
   - bzl
 scope: source.bazel
 
@@ -385,7 +386,7 @@ contexts:
     - match: '\s*\]'
       set: after-expression
     - match: '[^\s\]]*'
-      scope: invalid.illegal.expected-coma.bazel
+      scope: invalid.illegal.expected-comma.bazel
 
   comments:
     - match: "#"
